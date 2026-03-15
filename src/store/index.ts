@@ -118,34 +118,38 @@ export const useStore = create<AppState>()(
 
         const contacts = await storage.getContacts()
         const convMap = new Map<string, Conversation>()
+        const now = Date.now()
         for (const c of contacts) {
-          const messages = await storage.getMessages(c.id)
+          const messages = (await storage.getMessages(c.id)) as Message[]
+          // Filter already-expired messages immediately on load
+          const live = messages.filter(m => !m.ttl || m.ttl > now)
           convMap.set(c.id, {
             peerId: c.id, peerName: c.nickname, peerIdentityKey: c.identityKey,
-            messages: messages as Message[], unread: 0, isOnline: false, isTyping: false,
-            lastMessage: messages[messages.length - 1]?.content,
-            lastTs: messages[messages.length - 1]?.ts,
+            messages: live, unread: 0, isOnline: false, isTyping: false,
+            lastMessage: live[live.length - 1]?.content,
+            lastTs: live[live.length - 1]?.ts,
           })
         }
 
         set({ identity, conversations: convMap, isInitialized: true, isOnboarding: false })
         connectNetwork(identity, get, set)
+
+        // Re-schedule burn timers for messages loaded from DB
+        convMap.forEach((conv, peerId) => {
+          conv.messages.forEach(msg => {
+            if (msg.ttl) {
+              const delay = msg.ttl - Date.now()
+              if (delay <= 0) {
+                burnMessage(msg.id, peerId, get, set)
+              } else {
+                setTimeout(() => burnMessage(msg.id, peerId, get, set), delay)
+              }
+            }
+          })
+        })
       }
 
-      // Burn timer
-      setInterval(async () => {
-        await storage.burnExpiredMessages()
-        const { conversations } = get()
-        const now = Date.now()
-        const newConvs = new Map(conversations)
-        newConvs.forEach((conv, id) => {
-          const msgs = conv.messages.map(m =>
-            m.ttl && m.ttl < now && !m.burned ? { ...m, burned: true } : m
-          )
-          newConvs.set(id, { ...conv, messages: msgs })
-        })
-        set({ conversations: newConvs })
-      }, 2000)
+
     },
 
     createIdentity: async (displayName: string) => {
@@ -295,6 +299,34 @@ function addMessageToConv(peerId: string, msg: Message, get: () => AppState, set
     })
     set({ conversations: newConvs })
   }
+
+  // Schedule precise burn for this message
+  if (msg.ttl) {
+    const delay = msg.ttl - Date.now()
+    if (delay <= 0) {
+      burnMessage(msg.id, peerId, get, set)
+    } else {
+      setTimeout(() => burnMessage(msg.id, peerId, get, set), delay)
+    }
+  }
+}
+
+function burnMessage(msgId: string, peerId: string, get: () => AppState, set: (s: Partial<AppState>) => void) {
+  storage.burnMessage(msgId)
+  const { conversations } = get()
+  const conv = conversations.get(peerId)
+  if (!conv) return
+  const filtered = conv.messages.filter(m => m.id !== msgId)
+  if (filtered.length === conv.messages.length) return // already gone
+  const last = filtered[filtered.length - 1]
+  const newConvs = new Map(conversations)
+  newConvs.set(peerId, {
+    ...conv,
+    messages: filtered,
+    lastMessage: last ? (last.type === 'text' ? last.content : `[${last.type}]`) : undefined,
+    lastTs: last?.ts,
+  })
+  set({ conversations: newConvs })
 }
 
 function connectNetwork(identity: RuntimeIdentity, get: () => AppState, set: (s: Partial<AppState>) => void) {
@@ -338,7 +370,9 @@ function connectNetwork(identity: RuntimeIdentity, get: () => AppState, set: (s:
         type: payload.type || 'text', content: payload.content,
         fileName: payload.fileName, fileSize: payload.fileSize,
         fileMimeType: payload.fileMimeType, fileData: payload.fileData,
-        ts, status: 'delivered', ttl: payload.ttl,
+        ts, status: 'delivered',
+        // ttl: sender sends absolute expiry; recipient resets clock from time of receipt
+        ttl: payload.ttl ? Date.now() + (payload.ttl - ts) : undefined,
       }
       await storage.saveMessage(msg as StoredMessage)
       addMessageToConv(from, msg, get, set)

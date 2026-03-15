@@ -259,7 +259,7 @@ function MessageBubble({ msg, isMine, showTs, onImageClick }: { msg: Message; is
         </span>
       )}
       <div className={clsx('max-w-[72%] group')}>
-        {msg.burned ? null : <div className={clsx(
+        <div className={clsx(
           'px-4 py-2.5 rounded-2xl text-sm leading-relaxed break-words',
           isMine
             ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 rounded-br-md'
@@ -286,9 +286,9 @@ function MessageBubble({ msg, isMine, showTs, onImageClick }: { msg: Message; is
           ) : (
             msg.content
           )}
-        </div>}
+        </div>
         <div className={clsx('flex items-center gap-1 mt-0.5 px-1', isMine ? 'justify-end' : 'justify-start')}>
-          {msg.ttl && !msg.burned && (
+          {msg.ttl && (
             <span className="text-[10px] text-amber-400">🔥</span>
           )}
           {isMine && (
