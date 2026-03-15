@@ -46,6 +46,10 @@ class NetworkManager {
       this.onPresence?.(uid, false)
     })
 
+    this.socket.on('user_online', ({ userId: uid }: { userId: string }) => {
+      this.onPresence?.(uid, true)
+    })
+
     this.socket.on('disconnect', () => {
       console.log('[SafeChat] Disconnected from signal server')
     })

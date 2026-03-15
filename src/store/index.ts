@@ -88,7 +88,27 @@ export const useStore = create<AppState>()(
       // Step 1: load identity as plain JSON (no encryption key needed yet)
       const rawIdentity = await storage.loadIdentity() as StoredIdentity | null
 
-      if (rawIdentity) {
+      // Guard: if stored data is from an old/incompatible format, wipe and re-onboard
+      const isValid = rawIdentity
+        && rawIdentity.userId
+        && rawIdentity.keyPair
+        && rawIdentity.keyPair.privateKeyJwk
+        && rawIdentity.keyPair.publicKeyJwk
+        && rawIdentity.keyPair.publicKeyHex
+
+      if (!rawIdentity) {
+        set({ isInitialized: true, isOnboarding: true })
+        return
+      }
+
+      if (!isValid) {
+        console.warn('[SafeChat] Incompatible stored identity detected, clearing data...')
+        await storage.clearAll()
+        set({ isInitialized: true, isOnboarding: true })
+        return
+      }
+
+      if (isValid && rawIdentity) {
         // Step 2: derive storage key from the identity private key and activate it
         const storageKey = await deriveStorageKey(rawIdentity.keyPair.privateKeyJwk)
         storage.setStorageKey(storageKey)
@@ -110,8 +130,6 @@ export const useStore = create<AppState>()(
 
         set({ identity, conversations: convMap, isInitialized: true, isOnboarding: false })
         connectNetwork(identity, get, set)
-      } else {
-        set({ isInitialized: true, isOnboarding: true })
       }
 
       // Burn timer
@@ -122,7 +140,7 @@ export const useStore = create<AppState>()(
         const newConvs = new Map(conversations)
         newConvs.forEach((conv, id) => {
           const msgs = conv.messages.map(m =>
-            m.ttl && m.ttl < now && !m.burned ? { ...m, burned: true, content: '🔥 此消息已销毁' } : m
+            m.ttl && m.ttl < now && !m.burned ? { ...m, burned: true } : m
           )
           newConvs.set(id, { ...conv, messages: msgs })
         })
@@ -158,12 +176,23 @@ export const useStore = create<AppState>()(
       set({ conversations: newConvs })
     },
 
-    selectConversation: (peerId) => {
+    selectConversation: async (peerId) => {
       const { conversations } = get()
       const newConvs = new Map(conversations)
       const conv = newConvs.get(peerId)
       if (conv) newConvs.set(peerId, { ...conv, unread: 0 })
       set({ activeConversationId: peerId, conversations: newConvs })
+      // Actively check online status when opening a conversation
+      try {
+        const result = await network.checkOnline([peerId])
+        const isOnline = result[peerId] ?? false
+        const c2 = get().conversations.get(peerId)
+        if (c2) {
+          const m2 = new Map(get().conversations)
+          m2.set(peerId, { ...c2, isOnline })
+          set({ conversations: m2 })
+        }
+      } catch {}
     },
 
     sendMessage: async (peerId, content, type = 'text', fileData, fileName, fileSize, fileMimeType) => {

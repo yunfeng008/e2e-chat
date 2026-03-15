@@ -16,6 +16,7 @@ export function ChatPanel() {
   const { identity, conversations, activeConversationId, sendMessage, setDefaultTtl, defaultTtl } = useStore()
   const [input, setInput] = useState('')
   const [showTtl, setShowTtl] = useState(false)
+  const [lightbox, setLightbox] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -146,6 +147,7 @@ export function ChatPanel() {
             msg={msg}
             isMine={msg.senderId === identity?.userId}
             showTs={i === 0 || msg.ts - conv.messages[i-1].ts > 300_000}
+            onImageClick={setLightbox}
           />
         ))}
 
@@ -215,11 +217,32 @@ export function ChatPanel() {
           </button>
         </div>
       </div>
+      {lightbox && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+          onClick={() => setLightbox(null)}
+        >
+          <img
+            src={lightbox}
+            alt="图片预览"
+            className="max-w-full max-h-full rounded-xl object-contain"
+            onClick={e => e.stopPropagation()}
+          />
+          <button
+            onClick={() => setLightbox(null)}
+            className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/10 flex items-center justify-center text-white hover:bg-white/20 transition-colors"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   )
 }
 
-function MessageBubble({ msg, isMine, showTs }: { msg: Message; isMine: boolean; showTs: boolean }) {
+function MessageBubble({ msg, isMine, showTs, onImageClick }: { msg: Message; isMine: boolean; showTs: boolean; onImageClick?: (src: string) => void }) {
   if (msg.type === 'system') {
     return (
       <div className="flex justify-center py-2">
@@ -236,18 +259,18 @@ function MessageBubble({ msg, isMine, showTs }: { msg: Message; isMine: boolean;
         </span>
       )}
       <div className={clsx('max-w-[72%] group')}>
-        <div className={clsx(
+        {msg.burned ? null : <div className={clsx(
           'px-4 py-2.5 rounded-2xl text-sm leading-relaxed break-words',
           isMine
             ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 rounded-br-md'
-            : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-bl-md',
-          msg.burned && 'opacity-50 italic'
+            : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-bl-md'
         )}>
           {msg.type === 'image' && msg.fileData ? (
             <img
               src={`data:${msg.fileMimeType};base64,${msg.fileData}`}
               alt="图片"
-              className="max-w-full rounded-lg max-h-64 object-cover"
+              onClick={() => onImageClick?.(`data:${msg.fileMimeType};base64,${msg.fileData}`)}
+              className="max-w-full rounded-lg max-h-64 object-cover cursor-zoom-in"
             />
           ) : msg.type === 'file' ? (
             <div className="flex items-center gap-2">
@@ -263,7 +286,7 @@ function MessageBubble({ msg, isMine, showTs }: { msg: Message; isMine: boolean;
           ) : (
             msg.content
           )}
-        </div>
+        </div>}
         <div className={clsx('flex items-center gap-1 mt-0.5 px-1', isMine ? 'justify-end' : 'justify-start')}>
           {msg.ttl && !msg.burned && (
             <span className="text-[10px] text-amber-400">🔥</span>

@@ -125,6 +125,18 @@ class EncryptedStorage {
     await this.open()
     return this.db!.get('contacts', id)
   }
+
+  async clearAll() {
+    await this.open()
+    const tx = this.db!.transaction(['identity', 'sessions', 'messages', 'contacts'], 'readwrite')
+    await Promise.all([
+      tx.objectStore('identity').clear(),
+      tx.objectStore('sessions').clear(),
+      tx.objectStore('messages').clear(),
+      tx.objectStore('contacts').clear(),
+    ])
+    await tx.done
+  }
 }
 
 export const storage = new EncryptedStorage()
