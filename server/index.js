@@ -57,6 +57,13 @@ io.on('connection', (socket) => {
     io.to(to).emit('typing', { from: myUserId, isTyping })
   })
 
+  // Voice call signaling relay (server never touches audio)
+  socket.on('call_offer',  ({ to, fromName, sdp })  => io.to(to).emit('call_offer',  { from: myUserId, fromName, sdp }))
+  socket.on('call_answer', ({ to, sdp })            => io.to(to).emit('call_answer', { from: myUserId, sdp }))
+  socket.on('call_ice',    ({ to, candidate })      => io.to(to).emit('call_ice',    { from: myUserId, candidate }))
+  socket.on('call_reject', ({ to, reason })         => io.to(to).emit('call_reject', { from: myUserId, reason }))
+  socket.on('call_hangup', ({ to })                 => io.to(to).emit('call_hangup', { from: myUserId }))
+
   socket.on('disconnect', () => {
     if (myUserId) {
       onlineUsers.delete(myUserId)

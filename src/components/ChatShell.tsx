@@ -4,11 +4,13 @@ import { ConversationList } from './ConversationList'
 import { ChatPanel } from './ChatPanel'
 import { ProfilePanel } from './ProfilePanel'
 import { AddContactModal } from './AddContactModal'
+import { CallPiP } from './CallPiP'
 
 export function ChatShell() {
   const { activeConversationId } = useStore()
   const [showProfile, setShowProfile] = useState(false)
   const [showAddContact, setShowAddContact] = useState(false)
+
 
   return (
     <div className="h-screen flex bg-white dark:bg-zinc-950 overflow-hidden">
@@ -53,6 +55,9 @@ export function ChatShell() {
 
       {showProfile && <ProfilePanel onClose={() => setShowProfile(false)} />}
       {showAddContact && <AddContactModal onClose={() => setShowAddContact(false)} />}
+      <CallPiP />
+      {/* Hidden audio element for remote voice */}
+      <audio id="sc-remote-audio" autoPlay playsInline style={{ display: 'none' }} />
     </div>
   )
 }

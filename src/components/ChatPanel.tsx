@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useStore, type Message } from '../store'
+import { voiceCall } from '../crypto/voiceCall'
 import { network } from '../crypto/network'
 import { clsx } from 'clsx'
 import { format } from 'date-fns'
@@ -93,6 +94,24 @@ export function ChatPanel() {
             <span className="text-[11px] text-zinc-400">端对端加密 · 消息不经服务器</span>
           </div>
         </div>
+
+        {/* Voice call button */}
+        <button
+          title={conv.isOnline ? '发起语音通话' : '对方不在线，无法发起通话'}
+          onClick={() => {
+            if (!conv.isOnline) return
+            const { identity } = useStore.getState()
+            voiceCall.call(conv.peerId, conv.peerName, identity?.displayName ?? '我').catch(console.error)
+          }}
+          className={clsx(
+            'w-8 h-8 rounded-lg flex items-center justify-center transition-colors flex-shrink-0',
+            conv.isOnline ? 'text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900 cursor-pointer' : 'text-zinc-200 dark:text-zinc-800 cursor-not-allowed'
+          )}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 9.81 19.79 19.79 0 01.22 1.18 2 2 0 012.18 0h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L6.91 7.91a16 16 0 006.18 6.18l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>
+          </svg>
+        </button>
 
         {/* Burn timer toggle */}
         <div className="relative">

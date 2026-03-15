@@ -9,6 +9,7 @@ import {
 } from '../crypto/engine'
 import { storage, type StoredMessage, type Contact } from '../crypto/storage'
 import { network, type EncryptedEnvelope } from '../crypto/network'
+import { voiceCall } from '../crypto/voiceCall'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -331,6 +332,8 @@ function burnMessage(msgId: string, peerId: string, get: () => AppState, set: (s
 
 function connectNetwork(identity: RuntimeIdentity, get: () => AppState, set: (s: Partial<AppState>) => void) {
   network.connect(identity.userId, { identityKeyHex: toHex(identity.keyPair.publicKeyRaw) })
+  // Inject socket into voiceCall once it's connected
+  network.onSocketReady = (socket) => { voiceCall.setSocket(socket) }
 
   network.onMessage = async (from, envelope, ts) => {
     let session = sessionCache.get(from)

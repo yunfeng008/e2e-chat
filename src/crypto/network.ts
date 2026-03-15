@@ -25,14 +25,23 @@ class NetworkManager {
   onMessage: MessageHandler | null = null
   onTyping: TypingHandler | null = null
   onPresence: PresenceHandler | null = null
+  onSocketReady: ((socket: unknown) => void) | null = null
+
+  getSocket() { return this.socket }
 
   connect(userId: string, preKeyBundle: object) {
     this.socket = io(SERVER_URL, { transports: ['websocket'] })
 
     this.socket.on('connect', () => {
       this.socket!.emit('register', { userId, preKeyBundle })
+      this.onSocketReady?.(this.socket)
       console.log('[SafeChat] Connected to signal server')
     })
+
+    // Also fire immediately if already connected (reconnect case)
+    if (this.socket.connected) {
+      this.onSocketReady?.(this.socket)
+    }
 
     this.socket.on('message', ({ from, encryptedEnvelope, ts }: { from: string; encryptedEnvelope: EncryptedEnvelope; ts: number }) => {
       this.onMessage?.(from, encryptedEnvelope, ts)
