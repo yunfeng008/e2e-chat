@@ -10,6 +10,12 @@ import {
 import { storage, type StoredMessage, type Contact } from '../crypto/storage'
 import { network, type EncryptedEnvelope } from '../crypto/network'
 import { voiceCall } from '../crypto/voiceCall'
+import {
+  generateGroupId, generateGroupKey,
+  encryptGroupKeyForMember, decryptGroupKey,
+  encryptGroupMessage, decryptGroupMessage,
+  type GroupInfo, type GroupMember,
+} from '../crypto/groupCrypto'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,18 +33,23 @@ export interface Message {
   status: 'sent' | 'delivered' | 'read'
   ttl?: number
   burned?: boolean
+  mentions?: string[]  // userId[] who are @mentioned, includes 'all' for @all
 }
 
 export interface Conversation {
-  peerId: string
+  peerId: string          // for group: groupId; for direct: userId
   peerName: string
-  peerIdentityKey: string   // hex
+  peerIdentityKey: string // for direct only
+  type: 'direct' | 'group'
+  groupInfo?: GroupInfo
   messages: Message[]
   unread: number
+  mentionCount: number    // unread @mentions
   lastMessage?: string
   lastTs?: number
   isOnline: boolean
   isTyping: boolean
+  kicked?: boolean  // true if local user was removed from this group
 }
 
 interface StoredIdentity {
@@ -68,11 +79,19 @@ interface AppState {
   sendMessage: (peerId: string, content: string, type?: Message['type'], fileData?: string, fileName?: string, fileSize?: number, fileMimeType?: string) => Promise<void>
   setDefaultTtl: (ttl: number | null) => void
   getQRData: () => string
+  createGroup: (name: string, memberIds: string[]) => Promise<void>
+  inviteToGroup: (groupId: string, memberIds: string[]) => Promise<void>
+  kickFromGroup: (groupId: string, memberId: string) => void
+  dissolveGroup: (groupId: string) => void
 }
 
 // ─── Session cache ────────────────────────────────────────────────────────────
 
 const sessionCache = new Map<string, SessionState>()
+
+// ─── Group key cache ───────────────────────────────────────────────────────────
+
+const groupKeyCache = new Map<string, Uint8Array>() // groupId -> raw AES key
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
@@ -124,13 +143,38 @@ export const useStore = create<AppState>()(
           const messages = (await storage.getMessages(c.id)) as Message[]
           // Filter already-expired messages immediately on load
           const live = messages.filter(m => !m.ttl || m.ttl > now)
-          convMap.set(c.id, {
-            peerId: c.id, peerName: c.nickname, peerIdentityKey: c.identityKey,
-            messages: live, unread: 0, isOnline: false, isTyping: false,
-            lastMessage: live[live.length - 1]?.content,
-            lastTs: live[live.length - 1]?.ts,
-          })
+          if ((c as any).isGroup) {
+            const gi = (c as any).groupInfo as GroupInfo
+            convMap.set(c.id, {
+              peerId: c.id, peerName: c.nickname, peerIdentityKey: '',
+              type: 'group', groupInfo: gi, messages: live,
+              unread: 0, mentionCount: 0, isOnline: true, isTyping: false,
+              lastMessage: live[live.length - 1]?.content,
+              lastTs: live[live.length - 1]?.ts,
+            })
+          } else {
+            convMap.set(c.id, {
+              peerId: c.id, peerName: c.nickname, peerIdentityKey: c.identityKey,
+              type: 'direct', messages: live, unread: 0, mentionCount: 0, isOnline: false, isTyping: false,
+              lastMessage: live[live.length - 1]?.content,
+              lastTs: live[live.length - 1]?.ts,
+            })
+          }
         }
+
+        // Restore group keys from encrypted storage
+        try {
+          const savedKeys = await storage.loadAllGroupKeys()
+          for (const { id, key } of savedKeys) {
+            groupKeyCache.set(id, key)
+          }
+        } catch (e) { console.warn('Failed to restore group keys:', e) }
+
+        // Normalize all conversations - fill missing fields from old stored data
+        convMap.forEach((conv, id) => {
+          if (!conv.type) convMap.set(id, { ...conv, type: 'direct' })
+          if (conv.mentionCount === undefined) convMap.set(id, { ...convMap.get(id)!, mentionCount: 0 })
+        })
 
         set({ identity, conversations: convMap, isInitialized: true, isOnboarding: false })
         connectNetwork(identity, get, set)
@@ -176,7 +220,7 @@ export const useStore = create<AppState>()(
       const newConvs = new Map(conversations)
       newConvs.set(contactId, {
         peerId: contactId, peerName: nickname, peerIdentityKey: identityKeyHex,
-        messages: [], unread: 0, isOnline: false, isTyping: false,
+        type: 'direct', messages: [], unread: 0, mentionCount: 0, isOnline: false, isTyping: false,
       })
       set({ conversations: newConvs })
     },
@@ -185,7 +229,7 @@ export const useStore = create<AppState>()(
       const { conversations } = get()
       const newConvs = new Map(conversations)
       const conv = newConvs.get(peerId)
-      if (conv) newConvs.set(peerId, { ...conv, unread: 0 })
+      if (conv) newConvs.set(peerId, { ...conv, unread: 0, mentionCount: 0 })
       set({ activeConversationId: peerId, conversations: newConvs })
       // Actively check online status when opening a conversation
       try {
@@ -203,6 +247,47 @@ export const useStore = create<AppState>()(
     sendMessage: async (peerId, content, type = 'text', fileData, fileName, fileSize, fileMimeType) => {
       const { identity, conversations, defaultTtl } = get()
       if (!identity) return
+
+      const conv = conversations.get(peerId)
+
+      // ── Group message ────────────────────────────────────────────────────
+      if (conv?.type === 'group') {
+        if (conv.kicked) return // silently block kicked members
+        const groupKey = groupKeyCache.get(peerId)
+        if (!groupKey) { console.error('No group key for', peerId); return }
+        const ttl = defaultTtl ? Date.now() + defaultTtl : undefined
+        // Extract @mentions from content
+        const members = conv.groupInfo?.members ?? []
+        const mentions: string[] = []
+        const mentionRegex = /@(\S+)/g
+        let m
+        while ((m = mentionRegex.exec(content)) !== null) {
+          if (m[1].toLowerCase() === 'all') {
+            mentions.push('all')
+          } else {
+            const found = members.find(mb => mb.displayName === m[1])
+            if (found) mentions.push(found.userId)
+          }
+        }
+        const payload = JSON.stringify({ type, content, fileName, fileSize, fileMimeType, fileData, ttl, mentions })
+        const { ciphertext, nonce } = await encryptGroupMessage(groupKey, new TextEncoder().encode(payload))
+        for (const m of members) {
+          if (m.userId === identity.userId) continue
+          network.sendEncryptedMessage(m.userId, {
+            ciphertext, nonce, messageIndex: 0, messageType: type,
+            groupId: peerId,
+          } as any)
+        }
+        const msg: Message = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          conversationId: peerId, senderId: identity.userId,
+          type, content, fileName, fileSize, fileMimeType, fileData,
+          ts: Date.now(), status: 'sent', ttl, mentions,
+        }
+        await storage.saveMessage(msg as StoredMessage)
+        addMessageToConv(peerId, msg, get, set)
+        return
+      }
 
       let session = sessionCache.get(peerId)
       const isFirst = !session
@@ -272,6 +357,170 @@ export const useStore = create<AppState>()(
 
     setDefaultTtl: (ttl) => set({ defaultTtl: ttl }),
 
+    createGroup: async (name, memberIds) => {
+      const { identity, conversations } = get()
+      if (!identity) return
+
+      const groupId = generateGroupId()
+      const groupKey = await generateGroupKey()
+      groupKeyCache.set(groupId, groupKey)
+      await storage.saveGroupKey(groupId, groupKey)
+
+      // Build member list including self
+      const members: GroupMember[] = [{
+        userId: identity.userId,
+        displayName: identity.displayName,
+        identityKeyHex: toHex(identity.keyPair.publicKeyRaw),
+      }]
+      for (const id of memberIds) {
+        const conv = conversations.get(id)
+        if (conv && conv.type === 'direct') {
+          members.push({ userId: id, displayName: conv.peerName, identityKeyHex: conv.peerIdentityKey })
+        }
+      }
+
+      const groupInfo: GroupInfo = { id: groupId, name, creatorId: identity.userId, members, createdAt: Date.now() }
+
+      // Encrypt group key for each member and send via existing message channel
+      for (const member of members) {
+        if (member.userId === identity.userId) continue
+        const encKey = await encryptGroupKeyForMember(
+          groupKey, identity.keyPair.privateKey, member.identityKeyHex
+        )
+        // Use the existing sendEncryptedMessage - put groupInit as extra field
+        ;(network as any).sendGroupInit(member.userId, {
+          ciphertext: encKey.encryptedKey,
+          nonce: encKey.nonce,
+          messageIndex: 0,
+          messageType: 'system',
+          groupInit: {
+            groupId,
+            groupName: name,
+            members,
+            senderIdentityKeyHex: toHex(identity.keyPair.publicKeyRaw),
+          },
+        })
+      }
+
+      await storage.saveContact({ id: groupId, nickname: name, identityKey: '', addedAt: Date.now(), isGroup: true, groupInfo } as any)
+      const newConvs = new Map(conversations)
+      newConvs.set(groupId, {
+        peerId: groupId, peerName: name, peerIdentityKey: '',
+        type: 'group', groupInfo, messages: [], unread: 0, mentionCount: 0, isOnline: true, isTyping: false,
+      })
+      set({ conversations: newConvs, activeConversationId: groupId })
+    },
+
+    inviteToGroup: async (groupId, memberIds) => {
+      const { identity, conversations } = get()
+      if (!identity) return
+      const conv = conversations.get(groupId)
+      if (!conv || conv.type !== 'group' || conv.kicked) return
+      const groupKey = groupKeyCache.get(groupId)
+      if (!groupKey) { console.error('No group key for', groupId); return }
+
+      const existingMembers = conv.groupInfo?.members ?? []
+      const newMembers: GroupMember[] = []
+
+      // Collect new members info and send them the encrypted group key
+      for (const id of memberIds) {
+        const c = conversations.get(id)
+        if (!c || c.type !== 'direct') continue
+        // Skip if already a member
+        if (existingMembers.find(m => m.userId === id)) continue
+
+        const encKey = await encryptGroupKeyForMember(groupKey, identity.keyPair.privateKey, c.peerIdentityKey)
+        const newMember: GroupMember = { userId: id, displayName: c.peerName, identityKeyHex: c.peerIdentityKey }
+        newMembers.push(newMember)
+
+        const updatedMembers = [...existingMembers, ...newMembers]
+        ;(network as any).sendGroupInit(id, {
+          ciphertext: encKey.encryptedKey, nonce: encKey.nonce,
+          messageIndex: 0, messageType: 'system',
+          groupInit: {
+            groupId, groupName: conv.peerName,
+            members: updatedMembers,
+            senderIdentityKeyHex: toHex(identity.keyPair.publicKeyRaw),
+          },
+        })
+      }
+
+      if (newMembers.length === 0) return
+
+      // Update group member list locally
+      const updatedMembers = [...existingMembers, ...newMembers]
+      const newGroupInfo = { ...conv.groupInfo!, members: updatedMembers }
+      const newConvs = new Map(get().conversations)
+      newConvs.set(groupId, { ...conv, groupInfo: newGroupInfo })
+      set({ conversations: newConvs })
+      await storage.saveContact({ id: groupId, nickname: conv.peerName, identityKey: '', addedAt: Date.now(), isGroup: true, groupInfo: newGroupInfo } as any)
+
+      // Notify existing members about the new members
+      for (const m of existingMembers) {
+        if (m.userId === identity.userId) continue
+        ;(network as any).sendGroupInit(m.userId, {
+          ciphertext: [], nonce: [], messageIndex: 0, messageType: 'system',
+          groupUpdate: { groupId, members: updatedMembers },
+        })
+      }
+    },
+
+    kickFromGroup: (groupId, memberId) => {
+      const { identity, conversations } = get()
+      if (!identity) return
+      const conv = conversations.get(groupId)
+      if (!conv || conv.type !== 'group') return
+      if (conv.groupInfo?.creatorId !== identity.userId) return // only creator can kick
+
+      const newMembers = (conv.groupInfo.members ?? []).filter(m => m.userId !== memberId)
+      const newGroupInfo = { ...conv.groupInfo, members: newMembers }
+
+      // Notify all remaining members about the kick (so they update member list)
+      for (const m of newMembers) {
+        if (m.userId === identity.userId) continue
+        network.sendGroupInit(m.userId, {
+          ciphertext: [], nonce: [], messageIndex: 0, messageType: 'system',
+          groupUpdate: { groupId, members: newMembers },
+        })
+      }
+      // Notify kicked member
+      network.sendGroupInit(memberId, {
+        ciphertext: [], nonce: [], messageIndex: 0, messageType: 'system',
+        groupKick: { groupId },
+      })
+
+      const newConvs = new Map(conversations)
+      newConvs.set(groupId, { ...conv, groupInfo: newGroupInfo })
+      set({ conversations: newConvs })
+
+      // Persist updated group info
+      storage.saveContact({ id: groupId, nickname: conv.peerName, identityKey: '', addedAt: Date.now(), isGroup: true, groupInfo: newGroupInfo } as any)
+    },
+
+    dissolveGroup: (groupId) => {
+      const { identity, conversations } = get()
+      if (!identity) return
+      const conv = conversations.get(groupId)
+      if (!conv || conv.type !== 'group') return
+      if (conv.groupInfo?.creatorId !== identity.userId) return
+
+      // Notify all members the group is dissolved
+      const members = conv.groupInfo?.members ?? []
+      for (const m of members) {
+        if (m.userId === identity.userId) continue
+        ;(network as any).sendGroupInit(m.userId, {
+          ciphertext: [], nonce: [], messageIndex: 0, messageType: 'system',
+          groupDissolve: { groupId },
+        })
+      }
+
+      // Remove locally
+      const newConvs = new Map(get().conversations)
+      newConvs.delete(groupId)
+      set({ conversations: newConvs, activeConversationId: null })
+      storage.saveContact({ id: groupId, nickname: conv.peerName, identityKey: '', addedAt: 0, isGroup: true, dissolved: true } as any)
+    },
+
     getQRData: () => {
       const { identity } = get()
       if (!identity) return ''
@@ -287,16 +536,22 @@ export const useStore = create<AppState>()(
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function addMessageToConv(peerId: string, msg: Message, get: () => AppState, set: (s: Partial<AppState>) => void) {
-  const { conversations, activeConversationId } = get()
+  const { conversations, activeConversationId, identity } = get()
   const newConvs = new Map(conversations)
   const conv = newConvs.get(peerId)
   if (conv) {
+    const isActive = activeConversationId === peerId
+    const isMentioned = !isActive && msg.senderId !== identity?.userId && (
+      msg.mentions?.includes(identity?.userId ?? '') ||
+      msg.mentions?.includes('all')
+    )
     newConvs.set(peerId, {
       ...conv,
       messages: [...conv.messages, msg],
       lastMessage: msg.type === 'text' ? msg.content : `[${msg.type}]`,
       lastTs: msg.ts,
-      unread: activeConversationId === peerId ? 0 : conv.unread + 1,
+      unread: isActive ? 0 : conv.unread + 1,
+      mentionCount: isActive ? 0 : conv.mentionCount + (isMentioned ? 1 : 0),
     })
     set({ conversations: newConvs })
   }
@@ -324,6 +579,7 @@ function burnMessage(msgId: string, peerId: string, get: () => AppState, set: (s
   newConvs.set(peerId, {
     ...conv,
     messages: filtered,
+    mentionCount: conv.mentionCount ?? 0,
     lastMessage: last ? (last.type === 'text' ? last.content : `[${last.type}]`) : undefined,
     lastTs: last?.ts,
   })
@@ -336,6 +592,107 @@ function connectNetwork(identity: RuntimeIdentity, get: () => AppState, set: (s:
   network.onSocketReady = (socket) => { voiceCall.setSocket(socket) }
 
   network.onMessage = async (from, envelope, ts) => {
+    // ── Group init (key distribution) ─────────────────────────────────────
+    const env = envelope as any
+    // ── Group member update (kick/add) ───────────────────────────────────
+    if (env.groupDissolve) {
+      const { groupId } = env.groupDissolve
+      const newConvs = new Map(get().conversations)
+      newConvs.delete(groupId)
+      const currentActive = get().activeConversationId
+      set({
+        conversations: newConvs,
+        activeConversationId: currentActive === groupId ? null : currentActive,
+      })
+      return
+    }
+
+    if (env.groupUpdate) {
+      const { groupId, members } = env.groupUpdate
+      const { conversations } = get()
+      const conv = conversations.get(groupId)
+      if (conv && conv.type === 'group' && conv.groupInfo) {
+        const newGroupInfo = { ...conv.groupInfo, members }
+        const newConvs = new Map(get().conversations)
+        newConvs.set(groupId, { ...conv, groupInfo: newGroupInfo })
+        set({ conversations: newConvs })
+        await storage.saveContact({ id: groupId, nickname: conv.peerName, identityKey: '', addedAt: Date.now(), isGroup: true, groupInfo: newGroupInfo } as any)
+      }
+      return
+    }
+    if (env.groupKick) {
+      const { groupId } = env.groupKick
+      const newConvs = new Map(get().conversations)
+      const conv = newConvs.get(groupId)
+      if (conv) {
+        const kickMsg: Message = {
+          id: `${ts}-kick`, conversationId: groupId, senderId: from,
+          type: 'system', content: '你已被移出群聊', ts, status: 'delivered',
+        }
+        newConvs.set(groupId, { ...conv, kicked: true, messages: [...conv.messages, kickMsg] })
+        set({ conversations: newConvs })
+      }
+      return
+    }
+
+    if (env.groupInit) {
+      const { groupId, groupName, members, senderIdentityKeyHex } = env.groupInit
+      if (!groupKeyCache.has(groupId)) {
+        try {
+          const rawKey = await decryptGroupKey(
+            envelope.ciphertext, envelope.nonce,
+            identity.keyPair.privateKey, senderIdentityKeyHex
+          )
+          groupKeyCache.set(groupId, rawKey)
+          await storage.saveGroupKey(groupId, rawKey)
+        } catch { return }
+      }
+      // Create or update group conversation
+      const { conversations } = get()
+      const groupInfo: GroupInfo = { id: groupId, name: groupName, creatorId: from, members, createdAt: ts }
+      if (!conversations.has(groupId)) {
+        // Brand new group
+        await storage.saveContact({ id: groupId, nickname: groupName, identityKey: '', addedAt: ts, isGroup: true, groupInfo } as any)
+        const newConvs = new Map(get().conversations)
+        newConvs.set(groupId, {
+          peerId: groupId, peerName: groupName, peerIdentityKey: '',
+          type: 'group', groupInfo, messages: [], unread: 0, mentionCount: 0, isOnline: true, isTyping: false,
+        })
+        set({ conversations: newConvs })
+      } else {
+        // Already in group — update member list AND clear kicked flag if re-invited
+        const existing = conversations.get(groupId)!
+        const updatedGroupInfo = { ...existing.groupInfo!, members }
+        const newConvs = new Map(get().conversations)
+        newConvs.set(groupId, { ...existing, groupInfo: updatedGroupInfo, kicked: false })
+        set({ conversations: newConvs })
+        await storage.saveContact({ id: groupId, nickname: groupName, identityKey: '', addedAt: ts, isGroup: true, groupInfo: updatedGroupInfo } as any)
+      }
+      return
+    }
+
+    // ── Group message ──────────────────────────────────────────────────────
+    if (env.groupId) {
+      const groupKey = groupKeyCache.get(env.groupId)
+      if (!groupKey) return
+      try {
+        const plaintext = await decryptGroupMessage(groupKey, envelope.ciphertext, envelope.nonce)
+        const payload = JSON.parse(decodeText(plaintext))
+        const msg: Message = {
+          id: `${ts}-${Math.random().toString(36).slice(2)}`,
+          conversationId: env.groupId, senderId: from,
+          type: payload.type || 'text', content: payload.content,
+          fileName: payload.fileName, fileSize: payload.fileSize,
+          fileMimeType: payload.fileMimeType, fileData: payload.fileData,
+          ts, status: 'delivered', ttl: payload.ttl,
+          mentions: payload.mentions,
+        }
+        await storage.saveMessage(msg as StoredMessage)
+        addMessageToConv(env.groupId, msg, get, set)
+      } catch (e) { console.error('group decrypt failed:', e) }
+      return
+    }
+
     let session = sessionCache.get(from)
 
     if (!session) {

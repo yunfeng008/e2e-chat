@@ -50,10 +50,16 @@ export function ConversationList() {
         >
           {/* Avatar */}
           <div className="relative flex-shrink-0">
-            <div className={clsx('w-11 h-11 rounded-2xl flex items-center justify-center text-sm font-medium', avatarColor(conv.peerId))}>
-              {getInitials(conv.peerName)}
-            </div>
-            {conv.isOnline && (
+            {(conv.type === 'group') ? (
+              <div className="w-11 h-11 rounded-2xl bg-violet-100 dark:bg-violet-950 grid grid-cols-2 gap-0.5 p-2">
+                {[0,1,2,3].map(i => <div key={i} className="rounded-full bg-violet-400 dark:bg-violet-500" />)}
+              </div>
+            ) : (
+              <div className={clsx('w-11 h-11 rounded-2xl flex items-center justify-center text-sm font-medium', avatarColor(conv.peerId))}>
+                {getInitials(conv.peerName)}
+              </div>
+            )}
+            {conv.isOnline && conv.type !== 'group' && (
               <div className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-emerald-400 border-2 border-white dark:border-zinc-950" />
             )}
           </div>
@@ -76,11 +82,18 @@ export function ConversationList() {
                   conv.lastMessage || '开始加密对话'
                 )}
               </span>
-              {conv.unread > 0 && (
-                <span className="ml-2 flex-shrink-0 min-w-[18px] h-[18px] rounded-full bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-[10px] font-medium flex items-center justify-center px-1">
-                  {conv.unread > 99 ? '99+' : conv.unread}
-                </span>
-              )}
+              <div className="flex items-center gap-1 ml-2 flex-shrink-0">
+                {(conv.mentionCount ?? 0) > 0 && (
+                  <span className="min-w-[18px] h-[18px] rounded-full bg-emerald-500 text-white text-[10px] font-medium flex items-center justify-center px-1">
+                    @
+                  </span>
+                )}
+                {conv.unread > 0 && (
+                  <span className="min-w-[18px] h-[18px] rounded-full bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-[10px] font-medium flex items-center justify-center px-1">
+                    {conv.unread > 99 ? '99+' : conv.unread}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </button>

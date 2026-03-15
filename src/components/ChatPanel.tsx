@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useStore, type Message } from '../store'
+import { GroupInfoPanel } from './GroupInfoPanel'
 import { voiceCall } from '../crypto/voiceCall'
 import { network } from '../crypto/network'
 import { clsx } from 'clsx'
@@ -18,6 +19,9 @@ export function ChatPanel() {
   const [input, setInput] = useState('')
   const [showTtl, setShowTtl] = useState(false)
   const [lightbox, setLightbox] = useState<string | null>(null)
+  const [showGroupInfo, setShowGroupInfo] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null) // null=closed, string=search
+  const [mentionIndex, setMentionIndex] = useState(0)
   const endRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -77,14 +81,20 @@ export function ChatPanel() {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{conv.peerName}</span>
-            <span className={clsx(
-              'text-xs px-1.5 py-0.5 rounded-md font-medium',
-              conv.isOnline
-                ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400'
-                : 'bg-zinc-100 dark:bg-zinc-900 text-zinc-400'
-            )}>
-              {conv.isOnline ? '在线' : '离线'}
-            </span>
+            {conv.type === 'group' ? (
+              <span className="text-xs px-1.5 py-0.5 rounded-md font-medium bg-violet-50 dark:bg-violet-950 text-violet-600 dark:text-violet-400">
+                {conv.groupInfo?.members?.length ?? 0} 人
+              </span>
+            ) : (
+              <span className={clsx(
+                'text-xs px-1.5 py-0.5 rounded-md font-medium',
+                conv.isOnline
+                  ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400'
+                  : 'bg-zinc-100 dark:bg-zinc-900 text-zinc-400'
+              )}>
+                {conv.isOnline ? '在线' : '离线'}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1 mt-0.5">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" className="text-emerald-500">
@@ -112,6 +122,20 @@ export function ChatPanel() {
             <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 9.81 19.79 19.79 0 01.22 1.18 2 2 0 012.18 0h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L6.91 7.91a16 16 0 006.18 6.18l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>
           </svg>
         </button>
+
+        {/* Group info button — only shown for group conversations, hidden if kicked */}
+        {(conv.type === 'group') && !conv.kicked && (
+          <button
+            onClick={() => setShowGroupInfo(true)}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors flex-shrink-0"
+            title="群聊信息 · 加人 / 踢人"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>
+            </svg>
+          </button>
+        )}
 
         {/* Burn timer toggle */}
         <div className="relative">
@@ -167,6 +191,10 @@ export function ChatPanel() {
             isMine={msg.senderId === identity?.userId}
             showTs={i === 0 || msg.ts - conv.messages[i-1].ts > 300_000}
             onImageClick={setLightbox}
+            senderName={(conv.type === 'group') && msg.senderId !== identity?.userId
+              ? ((conv.groupInfo?.members ?? []).find(m => m.userId === msg.senderId)?.displayName ?? msg.senderId.slice(0,8))
+              : undefined}
+            myDisplayName={identity?.displayName}
           />
         ))}
 
@@ -184,6 +212,55 @@ export function ChatPanel() {
 
         <div ref={endRef} />
       </div>
+
+      {/* @ mention autocomplete popup */}
+      {mentionQuery !== null && (conv.type === 'group') && (() => {
+        const isCreator = conv.groupInfo?.creatorId === identity?.userId
+        const allOpt = { userId: 'all', displayName: 'all', identityKeyHex: '' }
+        const filtered = [...(isCreator ? [allOpt] : []), ...(conv.groupInfo?.members ?? []).filter(m => m.userId !== identity?.userId)]
+          .filter(m => m.displayName.toLowerCase().includes(mentionQuery.toLowerCase()))
+          .slice(0, 6)
+        if (!filtered.length) return null
+        return (
+          <div className="mx-4 mb-1 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl overflow-hidden shadow-sm">
+            {filtered.map((m, i) => (
+              <button
+                key={m.userId}
+                onMouseDown={e => {
+                  e.preventDefault()
+                  const atPos = input.lastIndexOf('@' + mentionQuery)
+                  const before = input.slice(0, atPos)
+                  const after = input.slice(atPos + mentionQuery.length + 1)
+                  setInput(before + '@' + m.displayName + ' ' + after)
+                  setMentionQuery(null)
+                  setMentionIndex(0)
+                  setTimeout(() => inputRef.current?.focus(), 0)
+                }}
+                className={clsx(
+                  'w-full flex items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors',
+                  i === mentionIndex ? 'bg-zinc-100 dark:bg-zinc-800' : 'hover:bg-zinc-50 dark:hover:bg-zinc-800/50'
+                )}
+              >
+                {m.userId === 'all' ? (
+                  <span className="w-6 h-6 rounded-full bg-zinc-900 dark:bg-white flex items-center justify-center flex-shrink-0">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" className="dark:stroke-zinc-900" strokeWidth="2" strokeLinecap="round">
+                      <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                      <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>
+                    </svg>
+                  </span>
+                ) : (
+                  <span className="w-6 h-6 rounded-full bg-zinc-200 dark:bg-zinc-700 flex items-center justify-center text-[10px] font-medium text-zinc-600 dark:text-zinc-300 flex-shrink-0">
+                    {m.displayName.slice(0,1).toUpperCase()}
+                  </span>
+                )}
+                <span className="text-zinc-900 dark:text-zinc-100 flex-1 font-medium text-xs">{m.displayName}</span>
+                {m.userId === 'all' && <span className="text-[10px] text-zinc-400">通知所有人</span>}
+                {i === mentionIndex && <kbd className="text-[9px] text-zinc-400 border border-zinc-200 dark:border-zinc-700 rounded px-1">↵</kbd>}
+              </button>
+            ))}
+          </div>
+        )
+      })()}
 
       {/* Input */}
       <div className="px-4 py-3 border-t border-zinc-100 dark:border-zinc-900">
@@ -211,15 +288,56 @@ export function ChatPanel() {
             ref={inputRef}
             value={input}
             onChange={e => {
-              setInput(e.target.value)
+              const val = e.target.value
+              setInput(val)
               handleTyping()
+              // @ mention detection
+              const cursor = e.target.selectionStart ?? val.length
+              const before = val.slice(0, cursor)
+              const atMatch = before.match(/@(\w*)$/)
+              if (atMatch) { setMentionQuery(atMatch[1]); setMentionIndex(0) }
+              else setMentionQuery(null)
               e.target.style.height = 'auto'
               e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
             }}
             onKeyDown={e => {
+              // @ mention keyboard navigation
+              if (mentionQuery !== null && conv.type === 'group') {
+                const isCreatorKb = conv.groupInfo?.creatorId === identity?.userId
+                const allOpt = { userId: 'all', displayName: 'all', identityKeyHex: '' }
+                const filtered = [...(isCreatorKb ? [allOpt] : []), ...(conv.groupInfo?.members ?? []).filter(m => m.userId !== identity?.userId)]
+                  .filter(m => m.displayName.toLowerCase().includes(mentionQuery.toLowerCase()))
+                  .slice(0, 6)
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  setMentionIndex(i => Math.min(i + 1, filtered.length - 1))
+                  return
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  setMentionIndex(i => Math.max(i - 1, 0))
+                  return
+                }
+                if (e.key === 'Enter' && filtered[mentionIndex]) {
+                  e.preventDefault()
+                  const m = filtered[mentionIndex]
+                  const atPos = input.lastIndexOf('@' + mentionQuery)
+                  const before = input.slice(0, atPos)
+                  const after = input.slice(atPos + mentionQuery.length + 1)
+                  setInput(before + '@' + m.displayName + ' ' + after)
+                  setMentionQuery(null)
+                  setMentionIndex(0)
+                  return
+                }
+                if (e.key === 'Escape') {
+                  setMentionQuery(null)
+                  return
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
             }}
-            placeholder="输入消息... (Enter 发送)"
+            placeholder={conv.kicked ? "你已被移出该群聊" : "输入消息... (Enter 发送)"}
+            disabled={!!conv.kicked}
             rows={1}
             className="flex-1 resize-none py-2 px-3 rounded-xl bg-zinc-100 dark:bg-zinc-900 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 outline-none max-h-[120px] overflow-y-auto leading-relaxed"
           />
@@ -227,7 +345,7 @@ export function ChatPanel() {
           {/* Send button */}
           <button
             onClick={handleSend}
-            disabled={!input.trim()}
+            disabled={!input.trim() || !!conv.kicked}
             className="flex-shrink-0 w-8 h-8 rounded-lg bg-zinc-900 dark:bg-white flex items-center justify-center disabled:opacity-30 transition-opacity hover:opacity-80"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" className="dark:stroke-zinc-900" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -236,6 +354,9 @@ export function ChatPanel() {
           </button>
         </div>
       </div>
+      {showGroupInfo && (conv.type === 'group') && (
+        <GroupInfoPanel groupId={conv.peerId} onClose={() => setShowGroupInfo(false)} />
+      )}
       {lightbox && (
         <div
           className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
@@ -261,7 +382,25 @@ export function ChatPanel() {
   )
 }
 
-function MessageBubble({ msg, isMine, showTs, onImageClick }: { msg: Message; isMine: boolean; showTs: boolean; onImageClick?: (src: string) => void }) {
+function MentionText({ text, myName }: { text: string; myName?: string }) {
+  const parts = text.split(/(@\S+)/g)
+  return (
+    <span>
+      {parts.map((p, i) => {
+        if (!p.startsWith('@')) return p
+        const name = p.slice(1)
+        const isMe = myName && name === myName
+        const isAll = name.toLowerCase() === 'all'
+        if (isMe || isAll) {
+          return <span key={i} className="bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 font-medium rounded px-0.5">{p}</span>
+        }
+        return <span key={i} className="text-zinc-600 dark:text-zinc-400 font-medium">{p}</span>
+      })}
+    </span>
+  )
+}
+
+function MessageBubble({ msg, isMine, showTs, onImageClick, senderName, myDisplayName }: { msg: Message; isMine: boolean; showTs: boolean; onImageClick?: (src: string) => void; senderName?: string; myDisplayName?: string }) {
   if (msg.type === 'system') {
     return (
       <div className="flex justify-center py-2">
@@ -278,6 +417,9 @@ function MessageBubble({ msg, isMine, showTs, onImageClick }: { msg: Message; is
         </span>
       )}
       <div className={clsx('max-w-[72%] group')}>
+        {senderName && !isMine && (
+          <div className="text-[11px] text-zinc-400 mb-0.5 px-1">{senderName}</div>
+        )}
         <div className={clsx(
           'px-4 py-2.5 rounded-2xl text-sm leading-relaxed break-words',
           isMine
@@ -303,7 +445,7 @@ function MessageBubble({ msg, isMine, showTs, onImageClick }: { msg: Message; is
               </div>
             </div>
           ) : (
-            msg.content
+            <MentionText text={msg.content} myName={myDisplayName} />
           )}
         </div>
         <div className={clsx('flex items-center gap-1 mt-0.5 px-1', isMine ? 'justify-end' : 'justify-start')}>

@@ -34,6 +34,8 @@ export interface Contact {
   identityKey: string
   addedAt: number
   lastSeen?: number
+  isGroup?: boolean
+  groupInfo?: unknown
 }
 
 class EncryptedStorage {
@@ -42,7 +44,7 @@ class EncryptedStorage {
 
   async open() {
     if (this.db) return
-    this.db = await openDB('safechat', 1, {
+    this.db = await openDB('safechat', 2, {
       upgrade(db) {
         db.createObjectStore('identity')
         db.createObjectStore('sessions', { keyPath: 'peerId' })
@@ -50,6 +52,7 @@ class EncryptedStorage {
         msgs.createIndex('by-conversation', 'conversationId')
         msgs.createIndex('by-ts', 'ts')
         db.createObjectStore('contacts', { keyPath: 'id' })
+        db.createObjectStore('groupKeys') // groupId -> encrypted raw key
       },
     })
   }
@@ -126,6 +129,34 @@ class EncryptedStorage {
     return this.db!.get('contacts', id)
   }
 
+  async saveGroupKey(groupId: string, rawKey: Uint8Array) {
+    await this.open()
+    const enc = await this.enc(Array.from(rawKey))
+    await this.db!.put('groupKeys', enc, groupId)
+  }
+  async loadGroupKey(groupId: string): Promise<Uint8Array | null> {
+    await this.open()
+    const v = await this.db!.get('groupKeys', groupId)
+    if (!v) return null
+    const arr = await this.dec(v as string) as number[]
+    return new Uint8Array(arr)
+  }
+  async loadAllGroupKeys(): Promise<{ id: string; key: Uint8Array }[]> {
+    await this.open()
+    const keys = await this.db!.getAllKeys('groupKeys') as string[]
+    const result = []
+    for (const k of keys) {
+      const v = await this.db!.get('groupKeys', k)
+      if (v) {
+        try {
+          const arr = await this.dec(v as string) as number[]
+          result.push({ id: k, key: new Uint8Array(arr) })
+        } catch {}
+      }
+    }
+    return result
+  }
+
   async clearAll() {
     await this.open()
     const tx = this.db!.transaction(['identity', 'sessions', 'messages', 'contacts'], 'readwrite')
@@ -134,6 +165,7 @@ class EncryptedStorage {
       tx.objectStore('sessions').clear(),
       tx.objectStore('messages').clear(),
       tx.objectStore('contacts').clear(),
+      tx.objectStore('groupKeys').clear(),
     ])
     await tx.done
   }

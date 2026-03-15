@@ -5,11 +5,13 @@ import { ChatPanel } from './ChatPanel'
 import { ProfilePanel } from './ProfilePanel'
 import { AddContactModal } from './AddContactModal'
 import { CallPiP } from './CallPiP'
+import { CreateGroupModal } from './CreateGroupModal'
 
 export function ChatShell() {
   const { activeConversationId } = useStore()
   const [showProfile, setShowProfile] = useState(false)
   const [showAddContact, setShowAddContact] = useState(false)
+  const [showCreateGroup, setShowCreateGroup] = useState(false)
 
 
   return (
@@ -29,6 +31,16 @@ export function ChatShell() {
               </svg>
             </div>
             <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">SafeChat</span>
+          </button>
+          <button
+            onClick={() => setShowCreateGroup(true)}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+            title="创建群聊"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/><path d="M20 8v6M23 11h-6"/>
+            </svg>
           </button>
           <button
             onClick={() => setShowAddContact(true)}
@@ -55,6 +67,7 @@ export function ChatShell() {
 
       {showProfile && <ProfilePanel onClose={() => setShowProfile(false)} />}
       {showAddContact && <AddContactModal onClose={() => setShowAddContact(false)} />}
+      {showCreateGroup && <CreateGroupModal onClose={() => setShowCreateGroup(false)} />}
       <CallPiP />
       {/* Hidden audio element for remote voice */}
       <audio id="sc-remote-audio" autoPlay playsInline style={{ display: 'none' }} />

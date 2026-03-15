@@ -68,6 +68,11 @@ class NetworkManager {
     this.socket?.emit('message', { to, encryptedEnvelope: envelope })
   }
 
+  // Send group init envelope (has extra groupInit field not in EncryptedEnvelope type)
+  sendGroupInit(to: string, envelope: unknown) {
+    this.socket?.emit('message', { to, encryptedEnvelope: envelope })
+  }
+
   sendTyping(to: string, isTyping: boolean) {
     this.socket?.emit('typing', { to, isTyping })
   }

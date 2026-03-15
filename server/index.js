@@ -53,6 +53,17 @@ io.on('connection', (socket) => {
     }
   })
 
+  // Group message broadcast: client sends to each member individually,
+  // server just relays. groupId is inside encryptedEnvelope (opaque to server).
+  socket.on('group_message', ({ members, encryptedEnvelope }) => {
+    const ts = Date.now()
+    for (const memberId of members) {
+      if (memberId !== myUserId && onlineUsers.has(memberId)) {
+        io.to(memberId).emit('message', { from: myUserId, encryptedEnvelope, ts })
+      }
+    }
+  })
+
   socket.on('typing', ({ to, isTyping }) => {
     io.to(to).emit('typing', { from: myUserId, isTyping })
   })
