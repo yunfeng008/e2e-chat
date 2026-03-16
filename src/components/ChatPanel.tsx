@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useStore, type Message } from '../store'
 import { GroupInfoPanel } from './GroupInfoPanel'
+import { VoiceInviteModal } from './VoiceInviteModal'
 import { voiceCall } from '../crypto/voiceCall'
+import { groupVoice } from '../crypto/groupVoice'
 import { network } from '../crypto/network'
 import { clsx } from 'clsx'
 import { format } from 'date-fns'
@@ -20,6 +22,21 @@ export function ChatPanel() {
   const [showTtl, setShowTtl] = useState(false)
   const [lightbox, setLightbox] = useState<string | null>(null)
   const [showGroupInfo, setShowGroupInfo] = useState(false)
+  // Track voice room activity to re-render button state
+  const [showVoiceInvite, setShowVoiceInvite] = useState(false)
+  const [, forceUpdate] = useState(0)
+  useEffect(() => {
+    groupVoice.onRoomActivity = () => forceUpdate(n => n + 1)
+    const prevInvite = groupVoice.onInvite
+    const prevCancel = groupVoice.onInviteCancel
+    groupVoice.onInvite = (gid, gn, fuid, fn) => { forceUpdate(n => n + 1); prevInvite?.(gid, gn, fuid, fn) }
+    groupVoice.onInviteCancel = (gid) => { forceUpdate(n => n + 1); prevCancel?.(gid) }
+    return () => {
+      groupVoice.onRoomActivity = null
+      groupVoice.onInvite = prevInvite
+      groupVoice.onInviteCancel = prevCancel
+    }
+  }, [])
   const [mentionQuery, setMentionQuery] = useState<string | null>(null) // null=closed, string=search
   const [mentionIndex, setMentionIndex] = useState(0)
   const endRef = useRef<HTMLDivElement>(null)
@@ -122,6 +139,46 @@ export function ChatPanel() {
             <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 9.81 19.79 19.79 0 01.22 1.18 2 2 0 012.18 0h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L6.91 7.91a16 16 0 006.18 6.18l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>
           </svg>
         </button>
+
+        {/* Group voice button — one button: start if no room, join if room exists, disabled if already in room */}
+        {(conv.type === 'group') && !conv.kicked && (() => {
+          const alreadyInRoom = !!groupVoice.getState()
+          const pendingInvite = groupVoice.hasPendingInvite(conv.peerId)
+          const roomExists = groupVoice.isRoomActive(conv.peerId)
+          const initiator = groupVoice.getRoomInitiator(conv.peerId)
+          const label = alreadyInRoom ? '已在语音中' : pendingInvite ? '有待处理的邀请' : roomExists ? `加入 ${initiator} 的语音` : '发起群语音'
+          const disabled = alreadyInRoom || pendingInvite
+          return (
+            <button
+              onClick={() => {
+                if (disabled) return
+                if (roomExists) {
+                  // Room already active — join directly
+                  const { identity } = useStore.getState()
+                  if (!identity || !conv.groupInfo) return
+                  const otherMembers = conv.groupInfo.members.filter(m => m.userId !== identity.userId)
+                  groupVoice.joinRoom(conv.peerId, conv.peerName, identity.userId, identity.displayName, conv.groupInfo.creatorId, otherMembers).catch(console.error)
+                } else {
+                  // No room — open invite picker
+                  setShowVoiceInvite(true)
+                }
+              }}
+              disabled={disabled}
+              className={clsx(
+                'w-8 h-8 rounded-lg flex items-center justify-center transition-colors flex-shrink-0',
+                disabled ? 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed' :
+                roomExists ? 'text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-950' :
+                'text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900'
+              )}
+              title={label}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+                <path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/>
+              </svg>
+            </button>
+          )
+        })()}
 
         {/* Group info button — only shown for group conversations, hidden if kicked */}
         {(conv.type === 'group') && !conv.kicked && (
@@ -356,6 +413,9 @@ export function ChatPanel() {
       </div>
       {showGroupInfo && (conv.type === 'group') && (
         <GroupInfoPanel groupId={conv.peerId} onClose={() => setShowGroupInfo(false)} />
+      )}
+      {showVoiceInvite && (conv.type === 'group') && (
+        <VoiceInviteModal groupId={conv.peerId} onClose={() => setShowVoiceInvite(false)} />
       )}
       {lightbox && (
         <div

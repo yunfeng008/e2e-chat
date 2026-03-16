@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useStore } from '../store'
 import { ConversationList } from './ConversationList'
 import { ChatPanel } from './ChatPanel'
@@ -6,12 +6,27 @@ import { ProfilePanel } from './ProfilePanel'
 import { AddContactModal } from './AddContactModal'
 import { CallPiP } from './CallPiP'
 import { CreateGroupModal } from './CreateGroupModal'
+import { GroupVoiceRoom } from './GroupVoiceRoom'
+import { GroupVoicePiP } from './GroupVoicePiP'
+import { groupVoice, type VoiceRoomState } from '../crypto/groupVoice'
+import { VoiceInviteBanner } from './VoiceInviteBanner'
 
 export function ChatShell() {
   const { activeConversationId } = useStore()
   const [showProfile, setShowProfile] = useState(false)
   const [showAddContact, setShowAddContact] = useState(false)
   const [showCreateGroup, setShowCreateGroup] = useState(false)
+  const [voiceState, setVoiceState] = useState<VoiceRoomState | null>(() => groupVoice.getState())
+  const [voiceInvite, setVoiceInvite] = useState<{ groupId: string; groupName: string; fromUserId: string; fromName: string } | null>(null)
+
+  useEffect(() => {
+    groupVoice.onStateChange = s => setVoiceState(s ? { ...s } : null)
+    // Also re-render when room activity changes (someone joins/leaves a room we're watching)
+    groupVoice.onRoomActivity = () => setVoiceState(s => s ? { ...s } : null)
+    groupVoice.onInvite = (groupId, groupName, fromUserId, fromName) => setVoiceInvite({ groupId, groupName, fromUserId, fromName })
+    groupVoice.onInviteCancel = (groupId) => setVoiceInvite(inv => inv?.groupId === groupId ? null : inv)
+    return () => { groupVoice.onStateChange = null; groupVoice.onRoomActivity = null; groupVoice.onInvite = null; groupVoice.onInviteCancel = null }
+  }, [])
 
 
   return (
@@ -69,6 +84,18 @@ export function ChatShell() {
       {showAddContact && <AddContactModal onClose={() => setShowAddContact(false)} />}
       {showCreateGroup && <CreateGroupModal onClose={() => setShowCreateGroup(false)} />}
       <CallPiP />
+      <GroupVoiceRoom voiceState={voiceState} />
+      <GroupVoicePiP voiceState={voiceState} />
+      {voiceInvite && (
+        <VoiceInviteBanner
+          groupId={voiceInvite.groupId}
+          groupName={voiceInvite.groupName}
+          fromUserId={voiceInvite.fromUserId}
+          fromName={voiceInvite.fromName}
+          onDismiss={() => setVoiceInvite(null)}
+        />
+      )}
+      <GroupVoiceRoom />
       {/* Hidden audio element for remote voice */}
       <audio id="sc-remote-audio" autoPlay playsInline style={{ display: 'none' }} />
     </div>

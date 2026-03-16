@@ -13,7 +13,8 @@ const io = new Server(httpServer, {
   maxHttpBufferSize: 50 * 1024 * 1024,
 })
 
-const onlineUsers = new Map()      // userId -> socketId
+const onlineUsers = new Map()
+const voiceRooms = new Map() // groupId -> Set<socketId>      // userId -> socketId
 const preKeyBundles = new Map()    // userId -> preKeyBundle
 
 io.on('connection', (socket) => {
@@ -66,6 +67,75 @@ io.on('connection', (socket) => {
 
   socket.on('typing', ({ to, isTyping }) => {
     io.to(to).emit('typing', { from: myUserId, isTyping })
+  })
+
+  // ── Group voice signaling ─────────────────────────────────────────────────
+  // Server maintains voiceRooms: groupId → Set<socketId> for targeted broadcast
+
+  // Broadcast helpers
+  function broadcastToGroup(groupId, event, payload, excludeSocket) {
+    const room = voiceRooms.get(groupId)
+    if (!room) return
+    for (const sid of room) {
+      if (excludeSocket && sid === excludeSocket.id) continue
+      io.to(sid).emit(event, payload)
+    }
+  }
+
+  socket.on('voice_join', ({ groupId, fromName }) => {
+    if (!voiceRooms.has(groupId)) voiceRooms.set(groupId, new Set())
+    const room = voiceRooms.get(groupId)
+
+    // Tell the newcomer who's already in the room (before adding them)
+    const existingUserIds = []
+    for (const [uid, sid] of onlineUsers.entries()) {
+      if (room.has(sid) && uid !== myUserId) existingUserIds.push(uid)
+    }
+    if (existingUserIds.length > 0) {
+      socket.emit('voice_room_members', { groupId, memberIds: existingUserIds })
+    }
+
+    room.add(socket.id)
+    broadcastToGroup(groupId, 'voice_join', { from: myUserId, fromName, groupId }, socket)
+  })
+
+  socket.on('voice_leave', ({ groupId }) => {
+    voiceRooms.get(groupId)?.delete(socket.id)
+    if (voiceRooms.get(groupId)?.size === 0) voiceRooms.delete(groupId)
+    broadcastToGroup(groupId, 'voice_leave', { from: myUserId, groupId }, null)
+  })
+
+  // Broadcast: mute / hand / host transfer — to all in same group room
+  socket.on('voice_mute',  ({ groupId, isMuted }) => broadcastToGroup(groupId, 'voice_mute',  { from: myUserId, isMuted, groupId }, socket))
+  socket.on('voice_hand',  ({ groupId, isHandRaised }) => broadcastToGroup(groupId, 'voice_hand',  { from: myUserId, isHandRaised, groupId }, socket))
+  socket.on('voice_host',  ({ groupId, newHostId }) => broadcastToGroup(groupId, 'voice_host_transfer', { newHostId, groupId }, socket))
+
+  // Point-to-point: invite, reject, signal, force actions
+  socket.on('voice_invite', ({ to, groupId, groupName, fromName }) => {
+    io.to(to).emit('voice_invite', { from: myUserId, groupId, groupName, fromName })
+  })
+  socket.on('voice_reject', ({ to, groupId }) => {
+    io.to(to).emit('voice_reject', { from: myUserId, groupId })
+  })
+  socket.on('voice_cancel', ({ to, groupId }) => {
+    io.to(to).emit('voice_cancel', { from: myUserId, groupId })
+  })
+  socket.on('voice_signal', ({ to, groupId, payload }) => {
+    io.to(to).emit('voice_signal', { from: myUserId, groupId, payload })
+  })
+  socket.on('voice_force_mute', ({ to, groupId }) => io.to(to).emit('voice_force_mute', { targetId: myUserId, groupId }))
+  socket.on('voice_force_kick', ({ to, groupId }) => io.to(to).emit('voice_kick', { targetId: to, groupId }))
+
+  // Clean up voice rooms on disconnect
+  socket.on('disconnect', () => {
+    for (const [groupId, sockets] of voiceRooms.entries()) {
+      if (sockets.has(socket.id)) {
+        sockets.delete(socket.id)
+        if (sockets.size === 0) voiceRooms.delete(groupId)
+        broadcastToGroup(groupId, 'voice_leave', { from: myUserId, groupId }, null)
+        break
+      }
+    }
   })
 
   // Voice call signaling relay (server never touches audio)
