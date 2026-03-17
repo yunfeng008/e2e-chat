@@ -102,7 +102,9 @@ io.on('connection', (socket) => {
   socket.on('voice_leave', ({ groupId }) => {
     voiceRooms.get(groupId)?.delete(socket.id)
     if (voiceRooms.get(groupId)?.size === 0) voiceRooms.delete(groupId)
-    broadcastToGroup(groupId, 'voice_leave', { from: myUserId, groupId }, null)
+    // Broadcast to ALL online users — ex-members (who already left) also need this
+    // to update their _activeRooms. Clients filter by groupId.
+    socket.broadcast.emit('voice_leave', { from: myUserId, groupId })
   })
 
   // Broadcast: mute / hand / host transfer — to all in same group room
@@ -132,7 +134,7 @@ io.on('connection', (socket) => {
       if (sockets.has(socket.id)) {
         sockets.delete(socket.id)
         if (sockets.size === 0) voiceRooms.delete(groupId)
-        broadcastToGroup(groupId, 'voice_leave', { from: myUserId, groupId }, null)
+        socket.broadcast.emit('voice_leave', { from: myUserId, groupId })
         break
       }
     }

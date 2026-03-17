@@ -34,9 +34,25 @@ class GroupVoiceManager {
   private _activeRooms = new Map<string, string>() // groupId -> initiatorName
   private _roomMemberCounts = new Map<string, Set<string>>() // groupId -> Set of userIds
   private _pendingInvites = new Map<string, Set<string>>() // groupId -> Set of invited userIds not yet responded
-  onRoomActivity: ((groupId: string, active: boolean, initiatorName?: string) => void) | null = null
+  // Multi-listener callbacks — use arrays so multiple components can subscribe
+  private _onRoomActivityListeners: ((groupId: string, active: boolean, initiatorName?: string) => void)[] = []
   onInvite: ((groupId: string, groupName: string, fromUserId: string, fromName: string) => void) | null = null
   onInviteCancel: ((groupId: string) => void) | null = null
+
+  // Compatibility shim: set onRoomActivity still works, but now supports multiple listeners
+  set onRoomActivity(fn: ((groupId: string, active: boolean, initiatorName?: string) => void) | null) {
+    // Replace the last registered listener (keeps backward compat with single-set pattern)
+    if (fn) {
+      if (this._onRoomActivityListeners.length > 0) this._onRoomActivityListeners[this._onRoomActivityListeners.length - 1] = fn
+      else this._onRoomActivityListeners.push(fn)
+    } else {
+      if (this._onRoomActivityListeners.length > 0) this._onRoomActivityListeners.pop()
+    }
+  }
+  addRoomActivityListener(fn: (groupId: string, active: boolean, initiatorName?: string) => void) {
+    this._onRoomActivityListeners.push(fn)
+    return () => { this._onRoomActivityListeners = this._onRoomActivityListeners.filter(l => l !== fn) }
+  }
   private _pendingReceivedInvites = new Set<string>() // groupIds we were invited to but haven't accepted/rejected
   private _socket: unknown = null
   private _pcs = new Map<string, RTCPeerConnection>()      // userId → PC
@@ -66,7 +82,7 @@ class GroupVoiceManager {
       this._roomMemberCounts.get(groupId)!.add(from)
       if (!this._activeRooms.has(groupId)) {
         this._activeRooms.set(groupId, fromName)
-        this.onRoomActivity?.(groupId, true, fromName)
+        this._onRoomActivityListeners.forEach(l => l(groupId, true, fromName))
       }
       // They accepted — remove from pending
       this._pendingInvites.get(groupId)?.delete(from)
@@ -90,9 +106,10 @@ class GroupVoiceManager {
         if (members.size === 0) {
           this._activeRooms.delete(groupId)
           this._roomMemberCounts.delete(groupId)
-          this.onRoomActivity?.(groupId, false)
         }
       }
+      // Always notify listeners so button re-renders even for ex-members
+      this._onRoomActivityListeners.forEach(l => l(groupId, this._activeRooms.has(groupId)))
       if (this._state?.groupId === groupId) this._removeMember(from)
     })
 
@@ -135,13 +152,24 @@ class GroupVoiceManager {
     s.on('voice_cancel', (data: unknown) => {
       const { groupId } = data as { groupId: string }
       this._pendingReceivedInvites.delete(groupId)
+      // Inviter cancelled — room is gone, clear active room state
+      this._activeRooms.delete(groupId)
+      this._roomMemberCounts.delete(groupId)
+      this._onRoomActivityListeners.forEach(l => l(groupId, false))
       this.onInviteCancel?.(groupId)
     })
 
-    // Incoming invite — show banner, do NOT touch room state
+    // Incoming invite — mark room active immediately (don't wait for voice_join broadcast)
     s.on('voice_invite', (data: unknown) => {
       const { from, groupId, groupName, fromName } = data as { from: string; groupId: string; groupName: string; fromName: string }
       this._pendingReceivedInvites.add(groupId)
+      // Pre-mark as active room so button shows "join" not "start" even before voice_join arrives
+      if (!this._activeRooms.has(groupId)) {
+        this._activeRooms.set(groupId, fromName)
+        if (!this._roomMemberCounts.has(groupId)) this._roomMemberCounts.set(groupId, new Set())
+        this._roomMemberCounts.get(groupId)!.add(from) // count the inviter
+        this._onRoomActivityListeners.forEach(l => l(groupId, true, fromName))
+      }
       this.onInvite?.(groupId, groupName, from, fromName)
     })
 
@@ -225,8 +253,22 @@ class GroupVoiceManager {
       }
     }
     this._emit('voice_leave', { groupId })
+    // Remove self from room count
     const rm = this._roomMemberCounts.get(groupId)
-    if (rm) { rm.delete(myUserId); if (rm.size === 0) { this._activeRooms.delete(groupId); this._roomMemberCounts.delete(groupId); this.onRoomActivity?.(groupId, false) } }
+    if (rm) {
+      rm.delete(myUserId)
+      if (rm.size === 0) {
+        // Room is now empty — clear everything
+        this._activeRooms.delete(groupId)
+        this._roomMemberCounts.delete(groupId)
+        this._onRoomActivityListeners.forEach(l => l(groupId, false))
+      }
+      // If others remain, keep _activeRooms so the button stays green for re-joining
+    } else {
+      // No count tracked — safe to clear
+      this._activeRooms.delete(groupId)
+      this._onRoomActivityListeners.forEach(l => l(groupId, false))
+    }
     this._pendingInvites.delete(groupId)
     this._cleanup()
     this._notify()

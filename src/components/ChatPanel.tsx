@@ -16,27 +16,26 @@ const TTL_OPTIONS = [
   { label: '24小时', value: 86_400_000 },
 ]
 
-export function ChatPanel() {
+export function ChatPanel({ roomActivityTick: _tick = 0 }: { roomActivityTick?: number }) {
   const { identity, conversations, activeConversationId, sendMessage, setDefaultTtl, defaultTtl } = useStore()
   const [input, setInput] = useState('')
   const [showTtl, setShowTtl] = useState(false)
   const [lightbox, setLightbox] = useState<string | null>(null)
   const [showGroupInfo, setShowGroupInfo] = useState(false)
-  // Track voice room activity to re-render button state
   const [showVoiceInvite, setShowVoiceInvite] = useState(false)
-  const [, forceUpdate] = useState(0)
+  const [, forceInviteUpdate] = useState(0)
   useEffect(() => {
-    groupVoice.onRoomActivity = () => forceUpdate(n => n + 1)
+    // Invite/cancel events also need to re-render the voice button (hasPendingInvite)
     const prevInvite = groupVoice.onInvite
     const prevCancel = groupVoice.onInviteCancel
-    groupVoice.onInvite = (gid, gn, fuid, fn) => { forceUpdate(n => n + 1); prevInvite?.(gid, gn, fuid, fn) }
-    groupVoice.onInviteCancel = (gid) => { forceUpdate(n => n + 1); prevCancel?.(gid) }
+    groupVoice.onInvite = (gid, gn, fuid, fn) => { forceInviteUpdate(n => n + 1); prevInvite?.(gid, gn, fuid, fn) }
+    groupVoice.onInviteCancel = (gid) => { forceInviteUpdate(n => n + 1); prevCancel?.(gid) }
     return () => {
-      groupVoice.onRoomActivity = null
       groupVoice.onInvite = prevInvite
       groupVoice.onInviteCancel = prevCancel
     }
   }, [])
+  // _tick from ChatShell drives re-render when room activity changes (even when ChatPanel was unmounted)
   const [mentionQuery, setMentionQuery] = useState<string | null>(null) // null=closed, string=search
   const [mentionIndex, setMentionIndex] = useState(0)
   const endRef = useRef<HTMLDivElement>(null)

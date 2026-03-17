@@ -18,14 +18,15 @@ export function ChatShell() {
   const [showCreateGroup, setShowCreateGroup] = useState(false)
   const [voiceState, setVoiceState] = useState<VoiceRoomState | null>(() => groupVoice.getState())
   const [voiceInvite, setVoiceInvite] = useState<{ groupId: string; groupName: string; fromUserId: string; fromName: string } | null>(null)
+  const [roomActivityTick, setRoomActivityTick] = useState(0)
 
   useEffect(() => {
     groupVoice.onStateChange = s => setVoiceState(s ? { ...s } : null)
     // Also re-render when room activity changes (someone joins/leaves a room we're watching)
-    groupVoice.onRoomActivity = () => setVoiceState(s => s ? { ...s } : null)
+    const removeActivity = groupVoice.addRoomActivityListener(() => { setVoiceState(s => s ? { ...s } : null); setRoomActivityTick(n => n + 1) })
     groupVoice.onInvite = (groupId, groupName, fromUserId, fromName) => setVoiceInvite({ groupId, groupName, fromUserId, fromName })
     groupVoice.onInviteCancel = (groupId) => setVoiceInvite(inv => inv?.groupId === groupId ? null : inv)
-    return () => { groupVoice.onStateChange = null; groupVoice.onRoomActivity = null; groupVoice.onInvite = null; groupVoice.onInviteCancel = null }
+    return () => { groupVoice.onStateChange = null; removeActivity(); groupVoice.onInvite = null; groupVoice.onInviteCancel = null }
   }, [])
 
 
@@ -74,7 +75,7 @@ export function ChatShell() {
       {/* Chat area */}
       <div className={`flex-1 flex flex-col min-w-0 ${!activeConversationId ? 'hidden md:flex' : 'flex'}`}>
         {activeConversationId ? (
-          <ChatPanel />
+          <ChatPanel roomActivityTick={roomActivityTick} />
         ) : (
           <EmptyState onAddContact={() => setShowAddContact(true)} />
         )}

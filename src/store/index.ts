@@ -11,7 +11,6 @@ import { storage, type StoredMessage, type Contact } from '../crypto/storage'
 import { network, type EncryptedEnvelope } from '../crypto/network'
 import { voiceCall } from '../crypto/voiceCall'
 import { groupVoice } from '../crypto/groupVoice'
-import { groupVoice } from '../crypto/groupVoice'
 import {
   generateGroupId, generateGroupKey,
   encryptGroupKeyForMember, decryptGroupKey,
