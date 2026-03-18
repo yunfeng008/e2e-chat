@@ -96,7 +96,6 @@ export function ChatShell() {
           onDismiss={() => setVoiceInvite(null)}
         />
       )}
-      <GroupVoiceRoom />
       {/* Hidden audio element for remote voice */}
       <audio id="sc-remote-audio" autoPlay playsInline style={{ display: 'none' }} />
     </div>
